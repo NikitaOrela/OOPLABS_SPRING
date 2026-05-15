@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+out/
+
+# Tool caches
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Test results
+TestResults/
+*.trx
+coverage.cobertura.xml
+*.lcov
+
+# Local environment
+*.local.json
+appsettings.Development.json
