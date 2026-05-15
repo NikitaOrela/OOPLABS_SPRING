@@ -46,14 +46,42 @@
 - `UserService` (план) — регистрация пользователей, проверка ролей.
 - `BookService` (план) — CRUD книг, ограничение «писатель управляет только своими книгами».
 
+## HTTP API (Lab 1, текущая итерация)
+
+`Library.Presentation` поднимает ASP.NET Core Web API. Все контроллеры — в `Controllers/`, DTOs — в `Contracts/`, маппинг сущностей в DTOs — `Contracts/Mapping.cs`. Доменные исключения переводятся в HTTP через `ErrorHandling/DomainExceptionFilter.cs` (404 для NotFound, 409 для конфликтов, 403 для ролевых нарушений, 422 для нарушений бизнес‑правил, 400 для прочих доменных и аргументных ошибок).
+
+| Метод | Маршрут | Назначение |
+| --- | --- | --- |
+| `POST` | `/api/users` | Создать пользователя (`userName`, `fullName`, `roles[]`). |
+| `GET` | `/api/users/{id}` | Получить пользователя. |
+| `POST` | `/api/books` | Писатель регистрирует свою книгу (`writerId`, `title`, `circulation`). |
+| `GET` | `/api/books/{id}` | Получить книгу (включая `suppliedCopies`, `availableCopies`, `remainingCirculation`). |
+| `POST` | `/api/requests` | Создать заявку (`applicantId`, `bookId`, `type`, `quantity`). |
+| `GET` | `/api/requests/{id}` | Получить заявку. |
+| `POST` | `/api/requests/{id}/approve` | Резолвить как одобренную (`librarianId`). |
+| `POST` | `/api/requests/{id}/reject` | Резолвить как отклонённую (`librarianId`). |
+
+## DI и состояние
+
+В `Program.ConfigureServices`:
+
+- `IUserRepository`, `IBookRepository`, `IBookRequestRepository`, `IClock` — `Singleton`. Этим способом in‑memory состояние сохраняется между HTTP‑запросами в рамках жизни процесса.
+- `IUserService`, `IBookService`, `IBookRequestService` — `Scoped`.
+- `DomainExceptionFilter` подключён глобально через `AddControllers(options => options.Filters.Add<DomainExceptionFilter>())`.
+
+В тестах `WebApplicationFactory<Program>` поднимает тот же `Program` без EF/БД, поэтому интеграционные сценарии работают «как в проде» с теми же DI‑регистрациями.
+
 ## Тестирование
 
 - `SmokeTests` — enum’ы, мультироль, уникальность `UserName`.
 - `BookRequestServiceTests` — 19 сценариев на все бизнес‑правила (успех и провал) каждого из пяти потоков.
+- `LibraryApiTests` — 6 интеграционных сценариев на API через `WebApplicationFactory<Program>`: happy path supply→receive→return, дубликат `userName` (409), повторный займ (422), превышение тиража (422), резолв не‑библиотекарем (403), авто‑одобрение для `Librarian+Reader`.
+
+Итого: **29 тестов, все зелёные**.
 
 ## TODO для полной реализации
 
-- Подключить `Microsoft.EntityFrameworkCore`, описать `LibraryDbContext` и миграции; реализовать репозитории поверх EF.
+- Подключить `Microsoft.EntityFrameworkCore`, описать `LibraryDbContext` и миграции; реализовать репозитории поверх EF (в `Library.Infrastructure`).
 - Подключить `MediatR`, перевести `BookRequestService` на команды/запросы.
-- Описать контроллеры `UsersController`, `BooksController`, `RequestsController` и DI в `Program.cs`.
-- Интеграционные тесты на EF Core In‑Memory / SQLite.
+- Расширить API: пагинированный листинг заявок/книг, фильтрация по статусу и пользователю.
+- Авторизация через JWT и роли ASP.NET Core (сейчас `applicantId` / `librarianId` приходят в теле запроса).
