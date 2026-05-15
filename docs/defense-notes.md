@@ -45,15 +45,39 @@
 
 ## ЛР2: аренда — ключевые моменты
 
-- Роли (`Client`, `Manager`, `Administrator`) — enum, начинается с `1`.
+- Роли (`Client`, `Manager`, `Administrator`) — enum, начинается с `1`. Мультироль поддерживается (`User.Roles` — коллекция, проверка через `HasRole`).
 - Статусы: `CarStatus` (`Available`, `Rented`, `UnderMaintenance`), `RentalRequestStatus` (`Pending`, `Approved`, `Rejected`, `Completed`).
-- Бизнес‑правила (план):
-  - уникальный `Vin` и `UserName`,
-  - проверка возраста (> 21) и стажа (≥ 2 лет), повышенные требования для мощных авто,
-  - запрет аренды для машин в `Rented` / `UnderMaintenance` и пересечения интервалов дат,
-  - авто‑одобрение, если клиент одновременно `Manager`,
-  - `price = dailyTariff * days`, штрафы добавляются при `Complete`,
-  - нарушения — `CarRentalDomainException` и наследники.
+- Сущности: `User`, `Car`, `RentalRequest` (см. `docs/lab2-architecture.md`). `RentalRequest.DurationDays = EndDate − StartDate` (полуинтервал, `EndDate > StartDate`).
+
+### Реализованные бизнес‑правила в `RentalRequestService`
+
+1. **Уникальность** `Vin` (InMemoryCarRepository) и `UserName` (InMemoryUserRepository) — `DuplicateVinException` / `DuplicateUserNameException` → 409.
+2. **Авторизация ролей**:
+   - регистрация авто и смена статуса — только `Manager` (`CarService`);
+   - управление ролями (`PUT /api/users/{id}/roles`) — только `Administrator` (`UserService.UpdateRolesAsync`);
+   - создание заявки — только `Client`;
+   - одобрение/отклонение/завершение — только `Manager`.
+3. **Допуск клиента** — `ClientEligibilityPolicy` (Domain). Базовое: `Age > 21` ∧ `DrivingExperienceYears ≥ 2`. Для авто с `PowerHp ≥ 250`: `Age ≥ 25` ∧ `DrivingExperienceYears ≥ 5`. Все пороги — `public const` в одной точке, тесты ссылаются на те же константы.
+4. **Доступность авто** проверяется и на создании, и на одобрении: `Car.Status == Available`, иначе `CarNotAvailableException` (422).
+5. **Пересечение дат**: полуинтервалы `[s1,e1)` и `[s2,e2)` пересекаются ⇔ `s1 < e2 ∧ s2 < e1`. Блокируют только `Approved` заявки — `Pending`/`Rejected`/`Completed` не держат календарь. Реализовано в `InMemoryRentalRequestRepository.HasOverlapAsync`.
+6. **Авто‑одобрение для Client+Manager**: при создании заявки сразу `Status = Approved`, `Price = DailyTariff * DurationDays`, авто → `Rented`, `ResolverId = ClientId`. Тест `CreateRequest_ByClientManager_IsAutoApproved`.
+7. **Расчёт цены и штрафов** — `RentalPricing`:
+   - `base = DailyTariff * DurationDays`,
+   - `damageFee = base * 0.5` при повреждении,
+   - `lateFee = DailyTariff * 1.5 * lateDays`.
+   Штрафы записываются в `RentalRequest.Penalty` при `CompleteAsync`. Цена считается в момент одобрения (или авто‑одобрения).
+8. **Завершение** возвращает авто в `Available`, только если оно сейчас `Rented` — менеджер мог перевести его в `UnderMaintenance` (например, после серьёзной аварии), и мы не должны это сбрасывать.
+9. **Повторное резолвинг**: одобрённую/отклонённую/завершённую заявку нельзя одобрить заново — `RentalRequestAlreadyResolvedException` (409).
+10. **Завершить можно только `Approved`** — `RentalRequestNotApprovedException` (422).
+
+### Что отвечать на типичные вопросы
+
+- *«Почему мощные авто = 250 HP и 25/5 лет?»* Это deterministic учебное правило. Пороги вынесены в `ClientEligibilityPolicy` как `public const`, чтобы их легко менять и чтобы тесты, документация и сервис ссылались на один источник. Они не претендуют на реальную модель страховых тарифов.
+- *«Почему перекрытие дат смотрится только по Approved?»* `Pending` ещё не контракт — две `Pending` заявки на один автомобиль могут уживаться до момента одобрения; кто первый получит `Approve`, того менеджер и оформляет. `Completed`/`Rejected` уже не держат авто.
+- *«Что если авто свободно (`Available`), но есть Approved заявка с пересекающимися датами?»* Бывает: завершённый владелец вернул машину раньше срока, но интервал до `EndDate` всё ещё «занят» под другого клиента, чью заявку менеджер уже одобрил. Сервис продолжает блокировать новые заявки на этот промежуток — `HasOverlapAsync` смотрит даты, а не текущий статус машины. Это покрыто тестом `CreateRequest_OverlapsExistingApprovedRental_Throws`.
+- *«Зачем `Client + Manager` авто‑одобрение?»* Прямое требование задачи: если запрос подаёт сотрудник в роли клиента, контракт оформляется сразу. Реализовано симметрично паттерну ЛР1 (`Librarian + Reader`).
+- *«Где валидация дат?»* `EndDate > StartDate` — `InvalidRentalRequestException` (422). `ActualReturnDate` не может быть раньше `StartDate` — `InvalidRentalRequestException` (422). Прочая валидация (положительные `PowerHp`, `DailyTariff`, `Age`) — `ArgumentOutOfRangeException` (400).
+- *«Как состояние сохраняется?»* В памяти процесса. `Singleton`‑регистрация репозиториев в `Program.cs`. EF Core добавим в следующей итерации.
 
 ## Соответствие styleguide курса
 
