@@ -4,7 +4,9 @@ using CarRental.Domain.Interfaces;
 
 namespace CarRental.Infrastructure.Persistence;
 
-// Placeholder in-memory implementation. EF Core context will replace this in Lab 2.
+// In-memory implementation. Holds state in process memory; everything is lost
+// on restart. Acceptable for the educational scope of Lab 2; EF Core would
+// replace this in a later iteration.
 public class InMemoryCarRepository : ICarRepository
 {
     private readonly Dictionary<int, Car> _byId = new();
@@ -19,7 +21,7 @@ public class InMemoryCarRepository : ICarRepository
 
     public Task<Car?> GetByVinAsync(string vin, CancellationToken cancellationToken = default)
     {
-        if (_idByVin.TryGetValue(vin, out var id))
+        if (vin is not null && _idByVin.TryGetValue(vin, out var id))
         {
             return GetByIdAsync(id, cancellationToken);
         }
@@ -33,7 +35,14 @@ public class InMemoryCarRepository : ICarRepository
         {
             throw new DuplicateVinException(car.Vin);
         }
-        car.Id = _nextId++;
+        if (car.Id == 0)
+        {
+            car.Id = _nextId++;
+        }
+        else if (car.Id >= _nextId)
+        {
+            _nextId = car.Id + 1;
+        }
         _byId[car.Id] = car;
         _idByVin[car.Vin] = car.Id;
         return Task.CompletedTask;
@@ -42,6 +51,10 @@ public class InMemoryCarRepository : ICarRepository
     public Task UpdateAsync(Car car, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(car);
+        if (!_byId.ContainsKey(car.Id))
+        {
+            throw new KeyNotFoundException($"Car {car.Id} was not found.");
+        }
         _byId[car.Id] = car;
         return Task.CompletedTask;
     }

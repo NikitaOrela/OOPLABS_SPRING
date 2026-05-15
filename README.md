@@ -135,9 +135,164 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/requests/1/approve \
   -d '{"librarianId":3}'                                    # reader id
 ```
 
-## Лаб 2 — статус
+## Лаб 2 — локальный запуск
 
-Скелет (`lab2-car-rental/`) собирается, но бизнес‑логика будет реализована в отдельных PR после слияния Лаб 1.
+### Клонирование и сборка
+
+```bash
+git clone https://github.com/NikitaOrela/OOPLABS_SPRING.git
+cd OOPLABS_SPRING
+
+# текущая итерация:
+git checkout feature/lab2-business-rules-api
+
+dotnet restore lab2-car-rental/CarRental.sln
+dotnet build   lab2-car-rental/CarRental.sln --nologo
+dotnet test    lab2-car-rental/CarRental.sln --nologo
+```
+
+### Запуск API
+
+```bash
+dotnet run --project lab2-car-rental/src/CarRental.Presentation
+```
+
+По умолчанию API стартует на `http://localhost:5000` (см. вывод `dotnet run`). Дальше `BASE=http://localhost:5000`.
+
+> Состояние API хранится **в памяти процесса** — после рестарта пользователи, машины и заявки исчезают.
+
+Numeric‑коды enum’ов: `UserRole` — `1=Client`, `2=Manager`, `3=Administrator`. `CarStatus` — `1=Available`, `2=Rented`, `3=UnderMaintenance`. `RentalRequestStatus` — `1=Pending`, `2=Approved`, `3=Rejected`, `4=Completed`.
+
+### Smoke‑сценарий (happy path)
+
+```bash
+BASE=http://localhost:5000
+
+# 1. Создаём менеджера (id=1) и клиента (id=2).
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"mgr","fullName":"Manager","age":40,"drivingExperienceYears":10,"roles":[2]}'
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"alice","fullName":"Alice","age":30,"drivingExperienceYears":5,"roles":[1]}'
+
+# 2. Менеджер регистрирует авто (id=1), 120 HP, 50 у.е./день.
+curl -s -X POST $BASE/api/cars -H 'Content-Type: application/json' \
+  -d '{"managerId":1,"vin":"VIN001","make":"Toyota","model":"Corolla","powerHp":120,"dailyTariff":50}'
+
+# 3. Клиент подаёт заявку на 2026-07-01 .. 2026-07-04.
+curl -s -X POST $BASE/api/rentals -H 'Content-Type: application/json' \
+  -d '{"clientId":2,"carId":1,"startDate":"2026-07-01","endDate":"2026-07-04"}'
+
+# 4. Менеджер одобряет заявку.
+curl -s -X POST $BASE/api/rentals/1/approve -H 'Content-Type: application/json' \
+  -d '{"managerId":1}'
+
+# 5. Авто стало Rented, price = 50 * 3 = 150.
+curl -s $BASE/api/cars/1
+curl -s $BASE/api/rentals/1
+
+# 6. Менеджер закрывает заявку — вернули 2026-07-04, без повреждений.
+curl -s -X POST $BASE/api/rentals/1/complete -H 'Content-Type: application/json' \
+  -d '{"managerId":1,"actualReturnDate":"2026-07-04","damaged":false}'
+
+# 7. Авто снова Available, заявка Completed, Penalty = 0.
+curl -s $BASE/api/cars/1
+curl -s $BASE/api/rentals/1
+```
+
+### Сценарии с отказом
+
+```bash
+# Возраст ≤ 21 → 422 (ClientNotEligibleException)
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"kid","fullName":"Kid","age":19,"drivingExperienceYears":1,"roles":[1]}'        # id=3
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/rentals \
+  -H 'Content-Type: application/json' \
+  -d '{"clientId":3,"carId":1,"startDate":"2026-08-01","endDate":"2026-08-04"}'                    # 422
+
+# Стаж < 2 лет → 422
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"fresh","fullName":"Fresh","age":25,"drivingExperienceYears":1,"roles":[1]}'    # id=4
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/rentals \
+  -H 'Content-Type: application/json' \
+  -d '{"clientId":4,"carId":1,"startDate":"2026-08-01","endDate":"2026-08-04"}'                    # 422
+
+# Мощное авто (≥ 250 HP): нужен возраст ≥ 25 и стаж ≥ 5
+curl -s -X POST $BASE/api/cars -H 'Content-Type: application/json' \
+  -d '{"managerId":1,"vin":"VINMUSCLE","make":"Dodge","model":"Charger","powerHp":300,"dailyTariff":120}'   # car id=2
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"young","fullName":"Young","age":23,"drivingExperienceYears":3,"roles":[1]}'    # id=5
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/rentals \
+  -H 'Content-Type: application/json' \
+  -d '{"clientId":5,"carId":2,"startDate":"2026-08-01","endDate":"2026-08-04"}'                    # 422
+
+# Авто в UnderMaintenance → 422
+curl -s -X POST $BASE/api/cars/2/status -H 'Content-Type: application/json' \
+  -d '{"managerId":1,"status":3}'                                                                  # UnderMaintenance
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/rentals \
+  -H 'Content-Type: application/json' \
+  -d '{"clientId":2,"carId":2,"startDate":"2026-09-01","endDate":"2026-09-04"}'                    # 422
+
+# Перекрытие дат с уже Approved заявкой → 422
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"bob","fullName":"Bob","age":30,"drivingExperienceYears":5,"roles":[1]}'        # id=6
+# alice уже арендовала VIN001 на 07-01..07-04 — Approved. Bob запрашивает 07-03..07-06:
+curl -s -X POST $BASE/api/cars/1/status -H 'Content-Type: application/json' \
+  -d '{"managerId":1,"status":1}'                                                                  # вручную в Available
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/rentals \
+  -H 'Content-Type: application/json' \
+  -d '{"clientId":6,"carId":1,"startDate":"2026-07-03","endDate":"2026-07-06"}'                    # 422
+
+# Регистрация авто не менеджером → 403
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/cars \
+  -H 'Content-Type: application/json' \
+  -d '{"managerId":2,"vin":"VINNM","make":"X","model":"Y","powerHp":150,"dailyTariff":50}'        # 403
+
+# Смена статуса авто не менеджером → 403
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/cars/1/status \
+  -H 'Content-Type: application/json' \
+  -d '{"managerId":2,"status":3}'                                                                  # 403
+
+# Одобрение не менеджером → 403
+curl -s -X POST $BASE/api/rentals -H 'Content-Type: application/json' \
+  -d '{"clientId":2,"carId":1,"startDate":"2026-10-01","endDate":"2026-10-04"}'                    # id=2 (Pending)
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/rentals/2/approve \
+  -H 'Content-Type: application/json' \
+  -d '{"managerId":2}'                                                                              # 403
+
+# Дубликат VIN → 409
+curl -s -o /dev/null -w "%{http_code}\n" -X POST $BASE/api/cars \
+  -H 'Content-Type: application/json' \
+  -d '{"managerId":1,"vin":"VIN001","make":"Other","model":"Other","powerHp":100,"dailyTariff":30}'  # 409
+```
+
+### Авто‑одобрение для Client + Manager
+
+```bash
+# Пользователь со ролями [Client, Manager]:
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"ceo","fullName":"CEO","age":35,"drivingExperienceYears":10,"roles":[1,2]}'
+
+# Заявка, поданная им самим, сразу Approved.
+curl -s -X POST $BASE/api/rentals -H 'Content-Type: application/json' \
+  -d '{"clientId":7,"carId":1,"startDate":"2026-11-01","endDate":"2026-11-03"}'
+```
+
+### Управление ролями (только Administrator)
+
+```bash
+# Создаём администратора:
+curl -s -X POST $BASE/api/users -H 'Content-Type: application/json' \
+  -d '{"userName":"root","fullName":"Root","age":40,"drivingExperienceYears":15,"roles":[3]}'
+
+# Администратор перенастраивает роли alice на [Client, Manager]:
+curl -s -X PUT $BASE/api/users/2/roles -H 'Content-Type: application/json' \
+  -d '{"administratorId":8,"roles":[1,2]}'
+
+# Не‑администратор не может менять роли → 403
+curl -s -o /dev/null -w "%{http_code}\n" -X PUT $BASE/api/users/2/roles \
+  -H 'Content-Type: application/json' \
+  -d '{"administratorId":1,"roles":[1]}'
+```
 
 ## Сводные команды
 
